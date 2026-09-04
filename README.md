@@ -9,6 +9,17 @@ fetched `https://example.com` and `https://api.github.com/zen` through the
 dynamically-registered tool, delegated via the subagent, and returned the real
 content.
 
+## Chaining multiple subagents
+
+To run several subagents and feed one's output into the next, see
+[ORCHESTRATION.md](ORCHESTRATION.md) and `dsh-chain-agents.mjs`. It uses dsh's
+built-in workflow engine (`pipeline()` + `agent()` with structured schemas)
+rather than a hand-rolled scheduler:
+
+```bash
+node dsh-chain-agents.mjs https://example.com https://api.github.com/zen
+```
+
 ## What the script does
 
 1. Writes a Cordis plugin (`fetch_url`, built with `defineTool`) into a fresh dir.
@@ -93,10 +104,7 @@ individually) in the environment or in `.env`. A missing launcher or profile
 fails at startup naming the exact path, rather than surfacing later as
 `spawn dsh ENOENT` or `no adapter registered for provider "openai"`.
 
-`.env` supplies `OPENAI_API_KEY`. Overrides: `DSH_PROVIDER` (default `openai`),
-`DSH_MODEL` (default `gpt-4o-mini`), `DSH_PROFILE` (default `sdk`).
-
-## Four things that bite
+## Six things that bite
 
 Each cost a debugging cycle; all are now handled in the script.
 
