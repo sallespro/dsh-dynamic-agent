@@ -4,7 +4,9 @@ A single script that spawns a DeepSeek Harness (dsh) runtime and adds a plugin
 **authored at runtime** which registers a web-fetch tool and a subagent that
 uses it. Routed to OpenAI via the pi-ai adapter.
 
-**Status: working end to end** against a `master` checkout. Verified runs
+**Status: working end to end** against a `master` checkout (dsh `0.2.2-alpha.2`,
+re-verified 2026-10-28 after porting from `0.1.2-rc.1` — see
+[Upgrading to dsh 0.2](#upgrading-to-dsh-02)). Verified runs
 fetched `https://example.com` and `https://api.github.com/zen` through the
 dynamically-registered tool, delegated via the subagent, and returned the real
 content.
@@ -54,7 +56,7 @@ git clone https://github.com/deepseek-ai/deepseek-harness.git ~/dev/deepseek-har
 cd ~/dev/deepseek-harness && pnpm install --frozen-lockfile && pnpm run build
 ```
 
-dsh requires **pnpm 11.7.0** (`packageManager` in the root `package.json`); a
+dsh requires the pnpm in its root `packageManager` field (**11.28.5** for `0.2.2-alpha.2`; `npx -y pnpm@11.28.5 …` works without a global install); a
 plain `npm install` breaks its dependency closure. Then provision a profile and
 link it at the built workspace packages:
 
@@ -68,7 +70,7 @@ The profile's `package.json` must list both bundles under `dsh.profile.bundles`
 point at the checkout, e.g. from `$DSH_HOME/profiles/sdk`:
 
 ```bash
-cd ~/dev/deepseek-harness/.dsh-home/profiles/sdk && pnpm add -w link:../../../packages/bundle/base link:../../../packages/bundle/sdk-app link:../../../packages/core/tools link:../../../packages/subagent/tool-subagent
+cd ~/dev/deepseek-harness/.dsh-home/profiles/sdk && pnpm add -w link:../../../packages/bundle/base link:../../../packages/bundle/sdk-app link:../../../packages/core/tools link:../../../packages/subagent/tool-subagent link:../../../packages/subagent/spawn-in-process link:../../../packages/preset/agent-preset link:../../../packages/preset/agent-preset-registry link:../../../packages/preset/persona
 ```
 
 These are symlinks into the checkout, so **moving either directory breaks
@@ -104,6 +106,32 @@ individually) in the environment or in `.env`. A missing launcher or profile
 fails at startup naming the exact path, rather than surfacing later as
 `spawn dsh ENOENT` or `no adapter registered for provider "openai"`.
 
+## Upgrading to dsh 0.2
+
+Three breaking changes between `0.1.2-rc.1` and `0.2.2-alpha.2`, all handled here:
+
+1. **`DeepSeekHarness` launch options are flat.** `launch: { command, args, cwd }`
+   is *silently ignored*; the client then falls back to the dsh tree published
+   to npm (which is missing `@deepseek-ai/cordis-plugin-group` and dies with
+   `JSON-RPC input closed`). Use `profile`, `dshBin`, `dshHome`, `patches`,
+   `processCwd` (and `cwd` for the session directory). Spawn from the harness
+   checkout (`processCwd: HARNESS`) so no project-local dsh is picked up.
+2. **Child persona/tools are agent presets.** `dsh-tool-subagent` rejects
+   `persona` and `toolFilter` at load. The patch now mounts
+   `agent-preset-registry` and a `researcher` preset (`dsh-persona` + the
+   runtime-authored `fetch_url` plugin) and points the tool at it with
+   `agentPreset: researcher`. Presets inherit the profile's global tools, so the
+   built-in `tool-web` is disabled to keep `fetch_url` the only fetcher.
+3. **Delegation is asynchronous.** A subagent call returns
+   `started subagent <id>` and the answer arrives as a notice; `run()` keeps
+   observing until the session is idle, so a one-shot script still gets the
+   final answer. `enableRunInBackground` no longer exists.
+
+The profile also needs `dsh-subagent-spawn-in-process`, `dsh-agent-preset`,
+`dsh-agent-preset-registry` and `dsh-persona` linked (command above). Set
+`DSH_DUMP_EVENTS=1` (or `2` for long payloads) to print every session event;
+each `assistant/message` carries `data.usage.{inputTokens,outputTokens}`.
+
 ## Six things that bite
 
 Each cost a debugging cycle; all are now handled in the script.
@@ -127,11 +155,9 @@ Each cost a debugging cycle; all are now handled in the script.
    `$DSH_HOME/settings.yaml` under the `llm-pi-ai` namespace. Both work;
    `apiKeyEnv` is resolved per request through the credential seam, so the key
    never enters a config file.
-5. **`run_in_background` defaults to exposed, and breaks a one-shot run.** The
-   model may delegate in the background and answer "I'll update you once the
-   subagent completes" — then the script collects its turn and exits with the
-   work unfinished (no `subagent.finished`). The patch sets
-   `enableRunInBackground: false` so the delegation completes in-turn.
+5. **(0.1 only) `run_in_background` broke one-shot runs.** Superseded in 0.2:
+   delegation is always asynchronous and `run()` waits for the session to go
+   idle (see [Upgrading](#upgrading-to-dsh-02)).
 6. **A client-rendered page invites fabrication.** `fetch_url` does not execute
    JavaScript, so a Vite/React shell yields markup with no prose — and the
    model will happily invent a confident summary from nothing. Observed
@@ -144,8 +170,10 @@ Each cost a debugging cycle; all are now handled in the script.
 
 ## Known blockers in the published npm packages
 
-Two upstream faults in the developer preview, which is why the build path above
-is required:
+Faults in the published developer-preview packages, which is why the build path
+above is still required (the 0.1 faults below were observed on `rc.1`; with
+`0.2.2-alpha.2` the npm `dsh` tree is still unusable — it lacks
+`@deepseek-ai/cordis-plugin-group`):
 
 - `@deepseek-ai/dsh-tools@0.0.1-rc.1` imports `CallId` from
   `@deepseek-ai/dsh-llm`, but `dsh-llm@0.1.2-rc.1` exports it as `ToolCallId`
@@ -153,12 +181,11 @@ is required:
 - `@deepseek-ai/dsh-tool-subagent` and `@deepseek-ai/dsh-sdk-jsonrpc-server`
   depend on `@deepseek-ai/dsh-tasks`, which is **not published** (404).
 
-Also note the shipped `dsh-sdk-client` constructor takes
-`{ launch: { command, args, cwd } }` — not the flat `{ profile, patches }` shown
-in its README. The script uses the real shape.
+The `dsh-sdk-client` constructor took `{ launch: { command, args, cwd } }` in
+`0.0.1-rc.1`; from `0.2` it takes the flat `{ profile, dshBin, dshHome, patches,
+processCwd }` shown in its README (this repo pins `0.2.2-alpha.2`).
 
 ## Security note
 
-`.env` holds a live API key in plaintext and this directory is not a git repo,
-so nothing is ignoring it yet. Add a `.gitignore` before committing, and rotate
-the key if it has been shared.
+`.env` holds a live API key in plaintext; it is git-ignored. Rotate the key if
+it has ever been shared.

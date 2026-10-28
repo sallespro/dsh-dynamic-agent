@@ -230,33 +230,58 @@ function buildPatch (pluginUrl) {
     provider: ${PROVIDER}
     model: ${MODEL}
 
+# The preset inherits the profile's global tools, so drop the built-in web
+# tool: fetch_url (ours, researcher-only) becomes the single way to fetch.
+- id: tool-web
+  disabled: true
+
 - insert:
-    - id: dynamic-web-fetch
-      name: '${pluginUrl}'
+    # dsh >= 0.2: a child's persona and tools are composed by an agent PRESET
+    # (tool-subagent rejects the old persona and toolFilter keys at load).
+    # The sdk profile ships no preset registry, so we mount one. The runtime-
+    # authored fetch plugin lives INSIDE the researcher preset, so only the
+    # child ever sees fetch_url.
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
-        maxChars: 20000
+        default: root
+
+    - id: preset-root
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: root
+        plugins: []
+
+    - id: preset-researcher
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: researcher
+        plugins:
+          - name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a focused web researcher. Use the fetch_url tool to
+                retrieve the pages you need, then answer with the findings and
+                the URLs you actually fetched. Do not speculate about content
+                you did not fetch.
+          - id: dynamic-web-fetch
+            name: '${pluginUrl}'
+            config:
+              maxChars: 20000
 
     # dsh-base already mounts the in-process 'spawn' provider (and a generic
     # 'subagent' tool over it). Re-inserting the provider fails the whole tree
     # with "a subagent provider named spawn is already registered", so we only
-    # add a second tool instance with our own name, persona, and tool filter.
+    # add a second tool instance. Delegation is asynchronous in 0.2: the call
+    # returns "started subagent <id>" and the result arrives as a notice, which
+    # run() keeps observing until the session is idle.
     - id: tool-subagent-researcher
       name: '@deepseek-ai/dsh-tool-subagent'
       inject: [tools, subagents, systemPrompt, sessionProjections]
       config:
         provider: spawn
         toolName: researcher
-        # This script collects one turn and exits, so the delegation must
-        # finish inside it. Left enabled, the model may pick run_in_background
-        # and answer before the child returns ("I'll update you once the
-        # subagent completes"), and the run ends with the work unfinished.
-        enableRunInBackground: false
-        persona: >-
-          You are a focused web researcher. Use the fetch_url tool to retrieve
-          the pages you need, then answer with the findings and the URLs you
-          actually fetched. Do not speculate about content you did not fetch.
-        toolFilter:
-          allow: [fetch_url]
+        agentPreset: researcher
         maxDepth: 1
 `
 }
@@ -290,19 +315,21 @@ try {
   console.error(`[dsh] patch   ${patchPath}`)
   console.error(`[dsh] booting profile "${PROFILE}" ...`)
 
-  // The launch spec is explicit: this client does not know about profiles, so
-  // we hand it the `dsh` bin and the launcher flags directly. `--profile sdk`
-  // boots the JSON-RPC server this client speaks to, and `--patch` applies our
-  // overlay after the profile's own bundle layers.
+  // sdk-client >= 0.2 takes the dsh launch as flat options (the older
+  // `launch: { command, args, cwd }` shape is silently ignored, which makes the
+  // client fall back to its own half-published npm dsh tree). `dshBin` points
+  // at the built checkout's launcher; `patches` are applied after the
+  // profile's own bundle layers.
   //
   // The subprocess starts lazily and stays owned across run() calls; `await
   // using` guarantees the child is reaped even if the run throws.
   await using harness = new DeepSeekHarness({
-    launch: {
-      command: DSH_BIN,
-      args: ['--profile', PROFILE, '--patch', patchPath],
-      cwd: process.cwd(),
-    },
+    profile: PROFILE,
+    dshBin: DSH_BIN,
+    dshHome: DSH_HOME,
+    patches: [patchPath],
+    processCwd: HARNESS, // the bin prefers a project-local dsh found from its cwd
+    cwd: process.cwd(), // session working directory
     // The handshake route must name a provider the runtime actually serves —
     // here the pi-ai route the patch above registered.
     provider: PROVIDER,
@@ -320,6 +347,9 @@ try {
     },
   })
 
+  if (process.env.DSH_DUMP_EVENTS) {
+    for (const e of result.events) console.error(`[dsh:event] ${e.type} ${JSON.stringify(e.data ?? null).slice(0, Number(process.env.DSH_DUMP_EVENTS) > 1 ? 4000 : 400)}`)
+  }
   console.error(`[dsh] session ${result.sessionId}`)
   console.log('\n' + result.finalResponse)
 } finally {

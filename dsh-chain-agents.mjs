@@ -197,11 +197,41 @@ function buildPatch (pluginUrl) {
     provider: ${PROVIDER}
     model: ${MODEL}
 
+# Presets inherit the profile's global tools: drop the built-in web tool so
+# fetch_url (ours) is the only way to fetch.
+- id: tool-web
+  disabled: true
+
 - insert:
-    - id: dynamic-web-fetch
-      name: '${pluginUrl}'
+    # dsh >= 0.2 composes a child's persona and tools with an agent preset
+    # (tool-subagent rejects persona / toolFilter at load).
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
-        maxChars: 20000
+        default: root
+
+    - id: preset-root
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: root
+        plugins: []
+
+    - id: preset-researcher
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: researcher
+        plugins:
+          - name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a focused web researcher. Use the fetch_url tool to
+                retrieve the pages you need, then answer with the findings and
+                the URLs you actually fetched. Do not speculate about content
+                you did not fetch.
+          - id: dynamic-web-fetch
+            name: '${pluginUrl}'
+            config:
+              maxChars: 20000
 
     - id: tool-subagent-researcher
       name: '@deepseek-ai/dsh-tool-subagent'
@@ -209,14 +239,8 @@ function buildPatch (pluginUrl) {
       config:
         provider: spawn
         toolName: researcher
-        persona: >-
-          You are a focused web researcher. Use the fetch_url tool to retrieve
-          the pages you need, then answer with the findings and the URLs you
-          actually fetched. Do not speculate about content you did not fetch.
-        toolFilter:
-          allow: [fetch_url]
+        agentPreset: researcher
         maxDepth: 1
-        enableRunInBackground: false
 `
 }
 
@@ -325,11 +349,12 @@ try {
   console.error(`[dsh] chaining 2 agents over ${TARGET_URLS.length} url(s)`)
 
   await using harness = new DeepSeekHarness({
-    launch: {
-      command: DSH_BIN,
-      args: ['--profile', PROFILE, '--patch', patchPath],
-      cwd: process.cwd(),
-    },
+    profile: PROFILE,
+    dshBin: DSH_BIN,
+    dshHome: DSH_HOME,
+    patches: [patchPath],
+    processCwd: HARNESS,
+    cwd: process.cwd(),
     provider: PROVIDER,
     model: MODEL,
     maxTokens: 32_768,
